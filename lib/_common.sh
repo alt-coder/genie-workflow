@@ -135,23 +135,56 @@ phase_done() {
   return 0
 }
 
-# Cleanup function (detaches, doesn't kill on signal)
+# Cleanup function — kills orphaned tmux sessions + worktrees on failure exit
 genie_cleanup() {
   local goal_dir="${1:-}"
-  log_info "Cleanup triggered for: ${goal_dir:-unknown}"
-  # Don't kill sessions — let them finish or be explicitly closed
-  # Save crash dump if directory exists
+  local exit_code=$?
+  local goal_id
+  goal_id=$(basename "$goal_dir" 2>/dev/null || echo "")
+
+  log_info "Cleanup (exit=$exit_code) for: ${goal_id:-unknown}"
+
+  # Success exit: leave worktrees for merge/inspection
+  [[ $exit_code -eq 0 ]] && return 0
+
+  # Failure exit: kill orphaned tmux sessions for this goal
+  if [[ -n "$goal_id" ]]; then
+    local sessions
+    sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${goal_id}-" || true)
+    for sess in $sessions; do
+      tmux kill-session -t "$sess" 2>/dev/null || true
+      log_warn "Killed orphaned session: $sess"
+    done
+
+    # Remove orphaned git worktrees
+    local worktree_base="${HOME}/.hermes/worktrees/${goal_id}"
+    if [[ -d "$worktree_base" ]]; then
+      local project_dir
+      project_dir=$(python3 -c "import json; print(json.load(open('${goal_dir}/goal-context.json')).get('project_dir','.'))" 2>/dev/null || echo ".")
+      if git -C "$project_dir" rev-parse --git-dir &>/dev/null 2>&1; then
+        git -C "$project_dir" worktree prune 2>/dev/null || true
+      fi
+      for wt in "$worktree_base"/*; do
+        [[ -d "$wt" ]] || continue
+        git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+      done
+      rmdir "$worktree_base" 2>/dev/null || true
+      log_warn "Cleaned worktrees: $worktree_base"
+    fi
+  fi
+
+  # Crash dump
   if [[ -n "$goal_dir" && -d "$goal_dir/raw-logs" ]]; then
     local dump="${goal_dir}/raw-logs/crash-$(date +%s).log"
-    echo "Crash dump at $(date -Iseconds)" > "$dump"
+    echo "Crash dump at $(date -Iseconds) (exit: $exit_code)" > "$dump"
     echo "Goal dir: $goal_dir" >> "$dump"
   fi
 }
 
-# Install trap for cleanup
+# Install EXIT trap for cleanup (EXIT fires on normal + signal-induced exit)
 trap_cleanup() {
   local goal_dir="$1"
-  trap 'genie_cleanup "'$goal_dir'"' EXIT INT TERM
+  trap 'genie_cleanup "'"${goal_dir}"'"' EXIT
 }
 
 # Export all functions for sourcing

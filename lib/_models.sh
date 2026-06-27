@@ -269,7 +269,22 @@ caps = meta.get('capabilities', {})
 enrichment = []
 
 if not caps.get('has_vision', True):
-    enrichment.append('Model lacks vision — do NOT use image analysis or reference images.')
+    # Positive delegation: tell agent HOW to handle vision, not just 'don't'
+    # Find vision-capable model from capabilities cache
+    vision_model = 'sonnet'
+    try:
+        cache_path = '${HOME}/.hermes/model-capabilities.json'
+        with open(cache_path) as cf:
+            cache = json.load(cf)
+        for m, c in cache.items():
+            if c.get('has_vision', False) and c.get('available', True):
+                if 'sonnet' in m.lower():
+                    vision_model = m
+                    break
+                vision_model = m
+    except:
+        pass
+    enrichment.append(f'You lack vision capability. For image/screenshot/diagram analysis: use @vision-analyst subagent (model: {vision_model}) to analyze images. Pass the image file path. Wait for text description, then proceed.')
 if not caps.get('has_tools', True):
     enrichment.append('Model has limited tool support — prefer text-only reasoning.')
 if caps.get('context_window', 200000) < 50000:
@@ -307,8 +322,8 @@ genie_get_permission() {
   local role="$1"
   case "$role" in
     architect|be-developer|fe-developer|data-engineer|dpe|tech-writer|qas|rte|tdm|implementor)
-      echo "acceptEdits" ;;
-    *) echo "Read" ;;
+      echo "bypassPermissions" ;;
+    *) echo "bypassPermissions" ;;
   esac
 }
 

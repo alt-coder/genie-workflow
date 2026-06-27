@@ -1,7 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+# ============================================================
+# hermes-spawn.sh v2 — Interactive spawn (manager-orchestrator)
+# ============================================================
+# Changes from v1:
+#   - Removed: --bare --print --effort --append-system-prompt --permission-mode
+#   - Added:   --brief (SendUserMessage), --agents (subagents), --model (when needed)
+#   - Uses:    _enrichment.sh for dynamic prompt building
+#   - Uses:    _sessions.sh for tmux session interaction
+#   - Flow:    enrich → budget gate → worktree → spawn tmux → wait ready →
+#              send enriched prompt via paste-buffer → pipe-pane logging
+# ============================================================
+
 source "${HOME}/.hermes/scripts/lib/_common.sh"
 source "${HOME}/.hermes/scripts/lib/_roles.sh"
+source "${HOME}/.hermes/scripts/lib/_models.sh"
+source "${HOME}/.hermes/scripts/lib/_sessions.sh"
+source "${HOME}/.hermes/scripts/lib/_enrichment.sh"
 
 genie_spawn() {
     local role="$1"
@@ -9,20 +25,34 @@ genie_spawn() {
     local goal_dir="$3"
     local goal_desc="$4"
     local idx="${5:-}"
+    local user_message="${6:-}"      # optional: original user message (enriched)
+    local has_image="${7:-false}"    # optional: does user message include image?
+    local image_path="${8:-}"        # optional: path to saved image
 
-    # ─── Intelligent model selection (v2) ───
-    # Passes goal context for complexity scoring, budget gating, provider detection
-    local model effort tools permission
-    model=$(genie_select_model "$role" "$goal_desc" "$goal_dir" "${project_dir:-.}")
-    effort=$(genie_get_effort "$role" "$goal_dir")
-    tools=$(genie_get_tools "$role")
-    permission=$(genie_get_permission "$role")
+    local suffix="${idx:+-${idx}}"
 
-    # Read the selection metadata if available
-    local selection_json="${goal_dir}/.model-selection.json"
-    log_info "Model selection: $(head -c 200 "$selection_json" 2>/dev/null || echo "$model / $effort (static fallback)")
+    # ─── 1. Enrich prompt (model decision tree, image, clarification, skills) ───
+    log_info "Enriching prompt for ${role}..."
 
-    # Budget gate (uses intelligent cost estimate if available)
+    local prompt_file
+    prompt_file=$(genie_enrich_prompt \
+        "$role" "$goal_desc" "$goal_dir" \
+        "$user_message" "$has_image" "$image_path" "$idx")
+
+    # Read model and agents from enrichment output files
+    local model_file="${goal_dir}/.model-${role}${suffix}.txt"
+    local agents_file="${goal_dir}/.agents-${role}${suffix}.json"
+    local main_model=""
+    local agents_json="{}"
+
+    if [[ -f "$model_file" ]]; then
+        main_model=$(cat "$model_file")
+    fi
+    if [[ -f "$agents_file" ]]; then
+        agents_json=$(cat "$agents_file")
+    fi
+
+    # ─── 2. Budget gate ───
     local est_cost
     est_cost=$(genie_estimate_cost "$role" 8000 "$goal_dir")
     log_info "Budget check: ${role} estimated \$${est_cost}"
@@ -31,146 +61,107 @@ genie_spawn() {
         return 1
     fi
 
-    # Generate session name
-    local session_name="${goal_id}-${role}${idx:+-${idx}}"
-    local agent_file="${goal_dir}/agent-${role}${idx}.md"
+    # ─── 3. Generate session name + paths ───
+    local session_name="${goal_id}-${role}${suffix}"
+    local agent_file="${goal_dir}/agent-${role}${suffix}.md"
     local session_log="${VAULT_DIR}/11-sessions/${session_name}.md"
 
-    # Load role prompt (if exists)
-    local role_prompt_file="${GENIE_LIB}/roles/${ROLE_PROMPTS[$role]:-}"
-    local role_prompt=""
-    if [[ -n "$role_prompt_file" && -f "$role_prompt_file" ]]; then
-        role_prompt=$(cat "$role_prompt_file")
-    fi
-
-    # Build system prompt
-    local sys_prompt="You are the ${role} for goal: ${goal_desc}.
-
-Write all output to your designated file: ${agent_file}
-Read the shared goal context at: ${goal_dir}/goal-context.json
-Read the spec at: ${goal_dir}/spec.md
-Read the plan at: ${goal_dir}/plan.md
-Read pattern discovery at: ${goal_dir}/context/pattern-discovery.md
-Use wikilinks [[${goal_id}]] to reference related work.
-
-When done, write a JSON completion marker to: ${goal_dir}/completion-markers/${role}${idx:+-${idx}}.done.json
-Marker format: {\"status\":\"done\",\"exit_code\":0,\"role\":\"${role}\"}
-
-${role_prompt}"
-
-    # ─── Model capability enrichment (v3) ───
-    # If model lacks vision → warn. If limited context → advise.
-    local enrichment
-    enrichment=$(genie_enrich_session "$role" "$goal_dir" "" 2>/dev/null)
-    if [[ -n "$enrichment" ]]; then
-        sys_prompt="${sys_prompt}
-
-Model capability notes:
-${enrichment}"
-    fi
-
-    # Log capabilities used
-    if [[ -f "${goal_dir}/.model-selection.json" ]]; then
-        local model_info
-        model_info=$(python3 -c "
-import json
-with open('${goal_dir}/.model-selection.json') as f:
-    m = json.load(f)
-caps = m.get('capabilities', {})
-print(f'model={m[\"model\"]} tier={m[\"tier\"]} vision={caps.get(\"has_vision\",\"?\")} tools={caps.get(\"has_tools\",\"?\")}')
-" 2>/dev/null)
-        log_info "Model capabilities: $model_info"
-    fi
-
-    # Skill injection (summaries only)
-    local skill_dir="${goal_dir}/skill-summaries"
-    if [[ -d "$skill_dir" ]]; then
-        sys_prompt="${sys_prompt}
-
-Relevant skills:"
-        for skill_file in "$skill_dir"/*.md; do
-            [[ -f "$skill_file" ]] || continue
-            local skill_name
-            skill_name=$(basename "$skill_file" .md)
-            sys_prompt="${sys_prompt}
-- ${skill_name}"
-        done
-    fi
-
-    # Worktree setup (if in a git repo)
+    # ─── 4. Worktree setup ───
     local worktree_path=""
-    local goal_context="${goal_dir}/goal-context.json"
     local project_dir="."
+    local goal_context="${goal_dir}/goal-context.json"
     if [[ -f "$goal_context" ]]; then
         project_dir=$(python3 -c "import json; print(json.load(open('$goal_context')).get('project_dir','.'))" 2>/dev/null || echo ".")
     fi
     if git -C "$project_dir" rev-parse --git-dir &>/dev/null 2>&1; then
         local worktree_base="${HOME}/.hermes/worktrees/${goal_id}"
-        worktree_path="${worktree_base}/${role}${idx:+-${idx}}"
+        worktree_path="${worktree_base}/${role}${suffix}"
         safe_mkdir "$worktree_path" 2>/dev/null || true
-        # Create worktree on a new branch
-        local branch_name="${goal_id}-${role}${idx:+-${idx}}"
+        local branch_name="${goal_id}-${role}${suffix}"
         if ! git -C "$project_dir" worktree list | grep -q "$worktree_path"; then
             git -C "$project_dir" worktree add -b "$branch_name" "$worktree_path" 2>/dev/null || true
         fi
-        sys_prompt="${sys_prompt}
-
-Your working directory (git worktree): ${worktree_path}
-Branch: ${branch_name}
-Commit your work as you go. Use conventional commit format."
     fi
 
-    # Spawn tmux session
-    log_info "Spawning ${role} (model: ${model}, effort: ${effort}) -> ${session_name}"
+    # ─── 5. Build claude launch command ───
+    # Simple: cd project && claude --dangerously-skip-permissions --brief --name SESSION
+    # Optional: --model MODEL, --agents JSON
+    local claude_cmd="cd '${project_dir}' && claude --dangerously-skip-permissions --brief --name '${session_name}'"
+    if [[ -n "$main_model" ]] && [[ "$main_model" != "default" ]]; then
+        claude_cmd+=" --model '${main_model}'"
+    fi
+    if [[ -n "$agents_json" ]] && [[ "$agents_json" != "{}" ]]; then
+        claude_cmd+=" --agents '${agents_json}'"
+    fi
 
-    tmux new-session -d -s "$session_name" \
-        "claude --name '${session_name}' \
-        --model '${model}' \
-        --effort '${effort}' \
-        --append-system-prompt '${sys_prompt}' \
-        --permission-mode '${permission}' \
-        2>&1 | tee '${agent_file}'"
+    log_info "Spawning ${role} (model: ${main_model:-default}) -> ${session_name}"
 
-    # Get PID
-    local pid
-    pid=$(tmux list-panes -t "$session_name" -F '#{pane_pid}' | head -1)
+    # ─── 6. Spawn tmux session ───
+    tmux new-session -d -s "$session_name" -x 140 -y 40 2>/dev/null || {
+        log_error "Failed to create tmux session: $session_name"
+        return 1
+    }
 
-    # Attach pipe-pane with filter
+    # Export TERM=dumb to suppress tcsetattr warnings
+    tmux send-keys -t "$session_name" "export TERM=dumb" Enter
+
+    # Launch claude
+    tmux send-keys -t "$session_name" "$claude_cmd" Enter
+
+    # ─── 7. Wait for claude to be ready ───
+    session_wait_ready "$session_name" 30
+
+    # ─── 8. Send enriched prompt via paste-buffer (handles multi-line) ───
+    # Load prompt into tmux buffer, paste it, then press Enter to submit
+    tmux load-buffer "$prompt_file" 2>/dev/null && {
+        tmux paste-buffer -t "$session_name" -d 2>/dev/null
+        sleep 0.5
+        tmux send-keys -t "$session_name" Enter
+    } || {
+        # Fallback: send-keys -l (for very large prompts, load-buffer might fail)
+        log_warn "load-buffer failed, using send-keys fallback"
+        tmux send-keys -t "$session_name" -l "$(cat "$prompt_file")"
+        tmux send-keys -t "$session_name" Enter
+    }
+
+    # ─── 9. Pipe-pane logging ───
     local raw_log="${goal_dir}/raw-logs/${session_name}.raw"
-    safe_mkdir "$(dirname "$raw_log")"
-    tmux pipe-pane -t "$session_name" -O "bash ${GENIE_DIR}/filter.sh >> '${session_log}' 2>> '${raw_log}'"
+    safe_mkdir "$(dirname "$raw_log")" 2>/dev/null || mkdir -p "$(dirname "$raw_log")" 2>/dev/null || true
+    tmux pipe-pane -t "$session_name" -O "bash ${GENIE_DIR}/filter.sh >> '${session_log}' 2>> '${raw_log}'" 2>/dev/null || true
 
-    # Write session metadata
+    # ─── 10. Get PID + write session metadata ───
+    local pid
+    pid=$(tmux list-panes -t "$session_name" -F '#{pane_pid}' 2>/dev/null | head -1 || echo "")
+
     local session_meta="${VAULT_DIR}/11-sessions/${session_name}.meta.json"
     cat > "$session_meta" <<EOF
 {
   "session_name": "${session_name}",
   "role": "${role}",
   "goal_id": "${goal_id}",
-  "model": "${model}",
-  "effort": "${effort}",
-  "tools": "${tools}",
-  "permission": "${permission}",
+  "model": "${main_model:-default}",
+  "agents": "${agents_json}",
   "pid": "${pid}",
   "started": "$(date -Iseconds)",
   "agent_file": "${agent_file}",
   "session_log": "${session_log}",
   "worktree": "${worktree_path}",
+  "prompt_file": "${prompt_file}",
   "status": "active"
 }
 EOF
 
-    # Record estimated cost
-    python3 "${GENIE_DIR}/budget_tracker.py" record "$goal_id" --cost "$est_cost" --phase "${role}${idx:+-$idx}"
+    # ─── 11. Record cost ───
+    python3 "${GENIE_DIR}/budget_tracker.py" record "$goal_id" --cost "$est_cost" --phase "${role}${suffix}" 2>/dev/null || true
 
-    log_ok "Spawned ${role} -> ${session_name} (PID: ${pid})"
-    echo "${session_name}"
+    log_ok "Spawned ${role} -> ${session_name} (PID: ${pid:-unknown})"
+    echo "$session_name"
 }
 
 # Main
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     if [[ $# -lt 4 ]]; then
-        log_error "Usage: $0 <role> <goal_id> <goal_dir> <goal_desc> [idx]"
+        log_error "Usage: $0 <role> <goal_id> <goal_dir> <goal_desc> [idx] [user_message] [has_image] [image_path]"
         exit 1
     fi
     genie_spawn "$@"

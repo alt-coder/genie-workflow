@@ -5,7 +5,7 @@
 | Parent | Keeps | Drops |
 |--------|-------|-------|
 | Genie v7 | one-command entry, N-critic→synth divergence, skill auto-injection, budget gate, per-agent files, post-hoc merge, Zettelkasten, priority queue, event-driven watchdog, JSON completion markers, ANSI filter, 23-pt preflight | generic-role-only roster (no specialists), no HITL gate, no PR/CI phase, no spec-first planning |
-| SAFe v2.10 | 11 specialized roles, specs-driven (Epic→Feature→Story→Enabler), MANDATORY pattern discovery, stop-the-line gate, independence gates (QAS+SecEng), role collapsing, 3-stage PR review, evidence→Linear, complexity-triggered SysArch review, dark-factory tmux layouts, harness manifest, merge-queue enforcement | manual method-1..4 selection (replaced by auto mode-detect), per-project isolated skills (replaced by central Hermes skill lib) |
+|| SAFe v2.10 | 11 specialized roles, specs-driven (Epic→Feature→Story→Enabler), MANDATORY pattern discovery, stop-the-line gate, independence gates (QAS+SecEng), role collapsing, 3-stage PR review, evidence→Linear/Plane, complexity-triggered SysArch review, dark-factory tmux layouts, harness manifest, merge-queue enforcement | manual method-1..4 selection (replaced by auto mode-detect), per-project isolated skills (replaced by central Hermes skill lib) |
 
 ---
 
@@ -13,13 +13,13 @@
 
 ```bash
 genie "<idea>"                       # greenfield — idea has no ticket/spec
-genie "<TICKET-ID>"                  # ticket — Linear/issue already has AC/DoD
+genie "<TICKET-ID>"                  # ticket — Linear/Plane already has AC/DoD
 genie "<idea>" --critics 5           # explicit critic count (must be odd)
 genie "<TICKET-ID>" --skip-preflight # bypass infra check (CI-known-good hosts)
 ```
 
 **Mode detect**:
-- Input matches `^[A-Z]+-\d+$` (e.g. `9R-456`, `REN-12`) → **ticket mode**. Pull AC/DoD from Linear. If AC/DoD missing → STOP-THE-LINE, escalate to BSA. Skip Phase 1a.
+- Input matches `^[A-Z]+-\d+$` (e.g. `9R-456`, `REN-12`) → **ticket mode**. Pull AC/DoD from Linear/Plane MCP. If AC/DoD missing → STOP-THE-LINE, escalate to BSA. Skip Phase 1a.
 - Otherwise → **greenfield mode**. Phase 1a runs BSA to create spec before any critics.
 
 ---
@@ -56,13 +56,13 @@ Two passes, both write to `staging/<goal_id>/context/`:
 Stop-the-line gate (SAFe v1.4): if no AC/DoD exists for the goal, **BSA** spawns first to create spec from idea:
 
 ```text
-idea → BSA (Sonnet/High, Read+Linear) → spec.md
+idea → BSA (Sonnet/High, Read+Linear/Plane) → spec.md
   spec contains: user story, acceptance criteria, DoD, demo script, low-level tasks
 ```
 
 BSA exit state: `"Spec ready — AC/DoD defined"`. Gate blocks Phase 1b until spec written.
 
-In ticket mode: pull existing AC/DoD from Linear, write to `staging/<goal_id>/spec.md`, skip 1a.
+In ticket mode: pull existing AC/DoD from Linear/Plane, write to `staging/<goal_id>/spec.md`, skip 1a.
 
 #### 1b. Critique + Synthesize + Architect plan (genie's deliberate divergence)
 
@@ -118,13 +118,13 @@ Implementer exit state (SAFe): `"Ready for QAS"`.
 QAS is a **gate owner**, not a report producer. Replaces genie's "implementor→tester→reviewer" loop with proper gate semantics.
 
 ```text
-implementer(s) done → QAS (Opus/High, Read+Bash(test)+Linear) → verdict
+implementer(s) done → QAS (Opus/High, Read+Bash(test)+Linear/Plane) → verdict
                                                           │
                                                           ├─ PASS  → "Approved for RTE" → Phase 4
                                                           └─ FAIL  → bounce-back to implementer (no retry cap on bounces, but total Phase 2+3 cycle capped at 3 full iterations)
 ```
 
-- QAS verifies **all ACs** from spec, runs tests, posts evidence to Linear (`mcp__linear__create_comment`).
+- QAS verifies **all ACs** from spec, runs tests, posts evidence to Linear/Plane (`mcp__linear__create_comment` or `mcp__plane__add_work_item_comment`).
 - QAS is an **independence gate** — never the same model session as implementer, never collapsible (SAFe 9R-499). Rationale: self-review bias.
 - Bounce-back re-runs Phase 2 only for failed specialists, not full rebuild.
 
@@ -222,7 +222,7 @@ These learnings feed **Phase 0.5 Pass B** for future goals — compounding knowl
 
 #### 7c. Evidence + reconciliation
 
-- Linear ticket updated with QAS verdict, SysArch approval, PR link (SAFe `mcp__linear__update_issue`).
+- Linear/Plane work item updated with QAS verdict, SysArch approval, PR link (`mcp__linear__update_issue` or `mcp__plane__update_work_item`).
 - Budget reconciliation report: `budget_tracker.py report <goal_id>` — estimate vs actual per phase.
 - Goal marked `completed`, moved to `99-archive/` after cooldown.
 
@@ -232,17 +232,17 @@ These learnings feed **Phase 0.5 Pass B** for future goals — compounding knowl
 
 | # | Role | Origin | Model | Effort | Tools | Collapsible? |
 |---|------|--------|-------|--------|-------|--------------|
-| 1 | BSA | SAFe | Sonnet | High | Read, Linear, Confluence | n/a (planning) |
+| 1 | BSA | SAFe | Sonnet | High | Read, Linear/Plane, Confluence | n/a (planning) |
 | 2 | System Architect | SAFe | Opus | Max | Read, Grep, ADR | n/a (review) |
 | 3 | BE Developer | SAFe | Sonnet | High | Read, Write, Edit, Bash | n/a |
 | 4 | FE Developer | SAFe | Sonnet | High | Read, Write, Edit, Bash | n/a |
 | 5 | Data Engineer | SAFe | Sonnet | High | Prisma, SQL, migration | n/a |
 | 6 | DPE | SAFe | Haiku | Low | SQL, Prisma Studio | n/a |
 | 7 | Tech Writer | SAFe | Sonnet | High | Read, Write, Edit, Grep, Glob | n/a |
-| 8 | QAS | SAFe | Opus | High | Read, Bash(test), Linear | **NEVER** (independence) |
+| 8 | QAS | SAFe | Opus | High | Read, Bash(test), Linear/Plane | **NEVER** (independence) |
 | 9 | Security Engineer | SAFe | Opus | High | RLS scripts, security tools | **NEVER** (independence) |
 | 10 | RTE | SAFe | Haiku | Low | Git, gh, CI tools | YES (simple PRs) |
-| 11 | TDM | SAFe | Sonnet | High | Linear, Confluence | n/a (reactive) |
+| 11 | TDM | SAFe | Sonnet | High | Linear/Plane, Confluence | n/a (reactive) |
 | 12 | Critic ×N | genie | Sonnet | High | Read-only | n/a |
 | 13 | Synthesizer | genie | Sonnet | High | Read-only | n/a |
 | 14 | Tiebreaker | genie | Sonnet | High | Read-only | n/a (only if no majority) |
@@ -293,6 +293,8 @@ identity:
   GITHUB_ORG, COMPANY_NAME, AUTHOR_*, SECURITY_EMAIL
   ARCHITECT_GITHUB_HANDLE, TICKET_PREFIX, LINEAR_WORKSPACE
   MAIN_BRANCH, MCP_LINEAR_SERVER, MCP_CONFLUENCE_SERVER
+  # Plane — open-source Jira/Linear alternative (preferred)
+  MCP_PLANE_SERVER, PLANE_WORKSPACE_SLUG, PLANE_API_URL
   DB_USER, DB_PASSWORD, DB_NAME, DB_CONTAINER
   DEV_CONTAINER, STAGING_CONTAINER, CONTAINER_REGISTRY
 substitutions: {}        # derived from identity, override if needed
@@ -384,6 +386,7 @@ epic   (9 panes): TDM + BSA + ARCH + SecEng + BE + FE + DE + QAS + RTE
 5. **Critic panel reads Zettelkasten** — critics cross-check against prior failure patterns. Catches recurring anti-patterns across goals.
 6. **Manifest drives both skill injection AND role config** — single source of project identity (SAFe manifest only drove sync; genie had no manifest).
 7. **Three-way reviewer split** — genie's single `reviewer` → QAS (AC gate) + SysArch (complexity gate) + Critic (holistic). Each lens independent, no single point of review failure.
+8. **Plane MCP as preferred project backend** — open-source Jira/Linear alternative. 55+ MCP tools (work items, cycles, modules, epics, intake). Hermes orchestrator uses native `mcp_plane_*`, Claude Code agents use `mcp__plane__*`. Setup: `bash ~/.hermes/scripts/hermes-plane-setup.sh`. Self-hosted or cloud.
 
 ---
 
@@ -437,7 +440,7 @@ epic   (9 panes): TDM + BSA + ARCH + SecEng + BE + FE + DE + QAS + RTE
 | Monitoring | event-driven watchdog | factory-status dashboard | both (watchdog drives dashboard) |
 | Completion signal | JSON markers | pane-state | JSON markers |
 | Knowledge capture | Zettelkasten (write-only) | none | **Zettelkasten (read+write, compounding)** |
-| Evidence system | filesystem (Obsidian) | Linear | Linear + Obsidian (linked) |
+| Evidence system | filesystem (Obsidian) | Linear | Linear/Plane + Obsidian (linked) |
 | PR/CI phase | none (produces codebase) | RTE + 3-stage review + merge queue | RTE + 3-stage review + merge queue |
 | HITL merge | none | Stage 3 | Stage 3 |
 | Persistent 24/7 | none | dark factory | dark factory (budget-capped) |
@@ -451,7 +454,7 @@ epic   (9 panes): TDM + BSA + ARCH + SecEng + BE + FE + DE + QAS + RTE
 
 ## 11. Open Questions (decide before implementation)
 
-1. **Linear MCP available in Hermes?** If not, evidence → Obsidian only (drop SAFe Linear integration, keep filesystem as system of record). Manifest field `MCP_LINEAR_SERVER` becomes optional.
+1. **Plane MCP (or Linear) available in Hermes?** If not, evidence → Obsidian only (drop SAFe integration, keep filesystem as system of record). Manifest field `MCP_PLANE_SERVER` (or `MCP_LINEAR_SERVER`) becomes optional. **Plane is preferred** — open-source, self-hostable, 55+ MCP tools vs Linear's REST API.
 2. **Multi-provider scope for v1?** v1 ships Hermes+Claude only (simplest). SAFe's Gemini/Codex/Cursor support deferred to v2 unless manifest explicitly configures.
 3. **Dark factory in v1?** Defer to v1.1 — one-shot pipeline (genie-style) is MVP. Dark factory adds 5 scripts + remote-machine setup; ship after one-shot validated.
 4. **Critic count default?** 3 (genie default). Manifest can override. N must be odd.

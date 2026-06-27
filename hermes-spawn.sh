@@ -10,16 +10,21 @@ genie_spawn() {
     local goal_desc="$4"
     local idx="${5:-}"
 
-    # Model selection with fallback (from _roles.sh via _models.sh)
+    # ─── Intelligent model selection (v2) ───
+    # Passes goal context for complexity scoring, budget gating, provider detection
     local model effort tools permission
-    model=$(genie_select_model "$role")
-    effort=$(genie_get_effort "$role")
+    model=$(genie_select_model "$role" "$goal_desc" "$goal_dir" "${project_dir:-.}")
+    effort=$(genie_get_effort "$role" "$goal_dir")
     tools=$(genie_get_tools "$role")
     permission=$(genie_get_permission "$role")
 
-    # Budget gate
+    # Read the selection metadata if available
+    local selection_json="${goal_dir}/.model-selection.json"
+    log_info "Model selection: $(head -c 200 "$selection_json" 2>/dev/null || echo "$model / $effort (static fallback)")
+
+    # Budget gate (uses intelligent cost estimate if available)
     local est_cost
-    est_cost=$(genie_estimate_cost "$role" 8000)
+    est_cost=$(genie_estimate_cost "$role" 8000 "$goal_dir")
     log_info "Budget check: ${role} estimated \$${est_cost}"
     if ! python3 "${GENIE_DIR}/budget_tracker.py" check "$goal_id" --estimate "$est_cost"; then
         log_error "Budget gate blocked spawn of ${role}"
@@ -52,6 +57,30 @@ When done, write a JSON completion marker to: ${goal_dir}/completion-markers/${r
 Marker format: {\"status\":\"done\",\"exit_code\":0,\"role\":\"${role}\"}
 
 ${role_prompt}"
+
+    # ─── Model capability enrichment (v3) ───
+    # If model lacks vision → warn. If limited context → advise.
+    local enrichment
+    enrichment=$(genie_enrich_session "$role" "$goal_dir" "" 2>/dev/null)
+    if [[ -n "$enrichment" ]]; then
+        sys_prompt="${sys_prompt}
+
+Model capability notes:
+${enrichment}"
+    fi
+
+    # Log capabilities used
+    if [[ -f "${goal_dir}/.model-selection.json" ]]; then
+        local model_info
+        model_info=$(python3 -c "
+import json
+with open('${goal_dir}/.model-selection.json') as f:
+    m = json.load(f)
+caps = m.get('capabilities', {})
+print(f'model={m[\"model\"]} tier={m[\"tier\"]} vision={caps.get(\"has_vision\",\"?\")} tools={caps.get(\"has_tools\",\"?\")}')
+" 2>/dev/null)
+        log_info "Model capabilities: $model_info"
+    fi
 
     # Skill injection (summaries only)
     local skill_dir="${goal_dir}/skill-summaries"

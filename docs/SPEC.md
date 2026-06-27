@@ -387,6 +387,7 @@ epic   (9 panes): TDM + BSA + ARCH + SecEng + BE + FE + DE + QAS + RTE
 6. **Manifest drives both skill injection AND role config** — single source of project identity (SAFe manifest only drove sync; genie had no manifest).
 7. **Three-way reviewer split** — genie's single `reviewer` → QAS (AC gate) + SysArch (complexity gate) + Critic (holistic). Each lens independent, no single point of review failure.
 8. **Plane MCP as preferred project backend** — open-source Jira/Linear alternative. 55+ MCP tools (work items, cycles, modules, epics, intake). Hermes orchestrator uses native `mcp_plane_*`, Claude Code agents use `mcp__plane__*`. Setup: `bash ~/.hermes/scripts/hermes-plane-setup.sh`. Self-hosted or cloud.
+9. **Intelligent model selection (v2)** — replaces static role→model mapping with 5-dimensional selection: (a) task complexity scoring from spec/ACs/codebase signals, (b) budget-aware tier gating ($ remaining → model ceiling), (c) multi-provider detection (Claude/DeepSeek/Gemini/OpenRouter), (d) performance history tracking per role×model×task_type, (e) context estimation for model window fit. Implemented in `_models.sh::genie_select_model_intelligent()`. Backward-compatible — static fallback when no goal context.
 
 ---
 

@@ -72,14 +72,15 @@ spawn_and_monitor() {
 }
 
 # ─── Helper: spawn parallel critics + monitor ────────────────
+# $5 = role_prefix (default: "critic", Phase 5 uses "critic-final")
 spawn_parallel_critics() {
-    local goal_id="$1" goal_dir="$2" goal_desc="$3" count="$4"
+    local goal_id="$1" goal_dir="$2" goal_desc="$3" count="$4" prefix="${5:-critic}"
 
     local sessions=()
     for i in $(seq 1 "$count"); do
         local sess
         sess=$(bash "${GENIE_DIR}/hermes-spawn.sh" \
-            critic "$goal_id" "$goal_dir" "$goal_desc" "$i" \
+            "$prefix" "$goal_id" "$goal_dir" "$goal_desc" "$i" \
             "${GENIE_USER_MSG:-}" "${GENIE_HAS_IMAGE:-false}" "${GENIE_IMAGE_PATH:-}")
         sessions+=("$sess")
     done
@@ -88,19 +89,19 @@ spawn_parallel_critics() {
     local pids=()
     for i in $(seq 1 "$count"); do
         (
-            session_monitor_loop "${sessions[$((i-1))]}" "$goal_dir" "critic" "$goal_id" "$i" "$WAITFOR_TTL" || true
-            local issues; issues=$(session_verify_output "$goal_dir" "critic" "$i")
+            session_monitor_loop "${sessions[$((i-1))]}" "$goal_dir" "$prefix" "$goal_id" "$i" "$WAITFOR_TTL" || true
+            local issues; issues=$(session_verify_output "$goal_dir" "$prefix" "$i")
             if [[ -n "$issues" ]]; then
-                log_warn "Critic ${i}: ${issues}"
+                log_warn "${prefix} ${i}: ${issues}"
             else
-                write_completion_marker "$goal_dir" "critic-${i}" "done" 0
+                write_completion_marker "$goal_dir" "${prefix}-${i}" "done" 0
             fi
         ) &
         pids+=($!)
     done
     wait
 
-    log_ok "All ${count} critics completed"
+    log_ok "All ${count} ${prefix} completed"
 }
 
 # ─── Phase 0.5: Clarification ───────────────────────────────
@@ -486,7 +487,7 @@ EOF
     # Phase 5: Final Critique (post-build, holistic)
     if ! phase_completed "$goal_dir" "critic-final-1"; then
         log_v "Phase 5: Final critique (${critic_count} critics, parallel)"
-        spawn_parallel_critics "$goal_id" "$goal_dir" "$goal_desc" "$critic_count"
+        spawn_parallel_critics "$goal_id" "$goal_dir" "$goal_desc" "$critic_count" "critic-final"
     fi
 
     # Phase 6: PR (RTE)
@@ -499,10 +500,46 @@ EOF
         fi
     fi
 
-    # Phase 7: Merge + Learn
+    # Phase 7: Merge + Learn (MANDATORY — not optional)
     log_v "Phase 7: Merge + Zettelkasten learning extraction"
-    bash "${GENIE_DIR}/merge_goal.sh" "$goal_dir" "$goal_id" 2>/dev/null || log_warn "Merge failed (non-fatal)"
-    bash "${GENIE_DIR}/zettelkasten.sh" "$goal_id" "$goal_dir" 2>/dev/null || log_warn "Learn extraction failed (non-fatal)"
+
+    # 7a: Merge all agent outputs into goal note
+    local merged_file=""
+    merged_file=$(bash "${GENIE_DIR}/merge_goal.sh" "$goal_dir" "$goal_id" 2>&1 | tail -1) || {
+        log_error "Phase 7a FAILED: merge_goal.sh exited non-zero"
+        log_error "Output: $merged_file"
+    }
+    # Verify merge produced output
+    local expected_merge="${VAULT_DIR}/10-goals/${goal_id}.md"
+    if [[ ! -f "$expected_merge" ]] || [[ ! -s "$expected_merge" ]]; then
+        log_error "Phase 7a FAILED: merged goal note missing or empty at ${expected_merge}"
+        log_error "Cannot proceed to learning extraction without merged output"
+    else
+        log_ok "Phase 7a: Merged to ${expected_merge} ($(wc -c < "$expected_merge") bytes)"
+
+        # 7b: Extract Zettelkasten learnings (only if merge succeeded)
+        local learn_output=""
+        learn_output=$(bash "${GENIE_DIR}/zettelkasten.sh" "$goal_id" "$goal_dir" 2>&1) || {
+            log_warn "Phase 7b: Learning extraction failed (non-fatal)"
+            log_warn "$learn_output"
+        }
+        # Verify learnings
+        local learning_count
+        learning_count=$(find "${VAULT_DIR}/20-learnings/" -name "*.md" -newer "$expected_merge" 2>/dev/null | wc -l)
+        if [[ "$learning_count" -gt 0 ]]; then
+            log_ok "Phase 7b: Extracted ${learning_count} learning(s) to ${VAULT_DIR}/20-learnings/"
+        else
+            log_warn "Phase 7b: No new learnings extracted (may be expected for trivial goals)"
+        fi
+
+        # 7c: Update MOC (Map of Content) for this goal
+        local moc="${VAULT_DIR}/40-meta/moc-sessions.md"
+        safe_mkdir "$(dirname "$moc")" 2>/dev/null || true
+        if ! grep -q "$goal_id" "$moc" 2>/dev/null; then
+            echo "- [[${goal_id}]] — $(date +%Y-%m-%d) — ${goal_desc:0:80}" >> "$moc"
+            log_ok "Phase 7c: MOC updated"
+        fi
+    fi
 
     # Mark complete
     python3 -c "

@@ -298,9 +298,62 @@ bash ~/.hermes/scripts/hermes-plane-setup.sh
 | 1a (Ticket) | Placeholder spec | Real work item via MCP (title, desc, AC, labels) |
 | 6 (PR) | PR created | + Work item status → "In Review", PR link added |
 
+## Research with opencode (Free Models)
+
+For research-heavy phases (BSA, pattern discovery, critic research), use **opencode** instead of Claude Code to save API costs. opencode is a harness like Claude Code (TUI, tools, agents) with free model access.
+
+### Setup
+
+```bash
+# opencode installed at ~/.opencode/bin/opencode (v1.17+)
+# Auth: opencode-go provider (auto-configured)
+# Config: ~/.config/opencode/opencode.jsonc
+```
+
+### Free models
+
+| Model ID | Use Case |
+|----------|----------|
+| `opencode/big-pickle` | General research, web search |
+| `opencode/deepseek-v4-flash-free` | Fast code analysis |
+| `opencode/mimo-v2.5-free` | Lightweight tasks |
+| `opencode/nemotron-3-ultra-free` | Heavy reasoning |
+| `opencode/north-mini-code-free` | Code-specific research |
+
+### Workflow (research in tmux)
+
+```bash
+# 1. Launch opencode in tmux
+tmux new-session -d -s research "opencode /home/ram/projects/myproject"
+
+# 2. Wait for TUI (~3s), then select free model
+tmux send-keys -t research "/model" Enter
+# → arrow keys to select opencode/big-pickle, Enter
+
+# 3. Type research query
+tmux send-keys -t research "Research existing GitHub workflows for video generation with Gita API. Star counts, architecture patterns, gaps." Enter
+
+# 4. Monitor output
+tmux capture-pane -t research -p -S -50
+
+# 5. When done, kill session
+tmux kill-session -t research
+```
+
+### Integration with genie
+
+When genie needs research (BSA pre-spec, pattern discovery, critic context):
+1. Hermes launches opencode in tmux with a free model
+2. Types the research query
+3. Captures output
+4. Feeds research context into the Claude Code agent prompt
+
+This saves paid API calls — research uses free models, implementation uses Claude Code.
+
 ## Architecture
 
 - **Interactive sessions** — `claude --dangerously-skip-permissions --brief` in tmux, not one-shot `--print`
+- **Research sessions** — `opencode` in tmux with free models (big-pickle, deepseek-v4-flash-free)
 - **Per-agent files** — no shared mutable state during work
 - **Git worktrees** — code isolation per agent
 - **Post-hoc merge** — mtime-safe concatenation into goal note (Phase 7a, MANDATORY)
@@ -377,6 +430,8 @@ If user says "no PR" or "no need to raise a PR", let the pipeline complete throu
 
 ## Pitfalls
 
+- **Repo sync after skill updates**: When the `genie` skill is updated in Hermes (`~/.hermes/skills/genie/`), changes must be manually synced to the git repo (`~/genie-workflow/skills/genie/`) and pushed. Copy `SKILL.md` + `references/`, delete any removed sub-skills, then `git add -A && git commit && git push`. Hermes-local skills and repo skills are NOT auto-linked.
+- **safe-agentic-workflow is read-only**: The skill lineage references `safe-agentic-workflow` v2.10 as an origin, but that repo must NOT be modified. All genie updates go to `~/genie-workflow/` only.
 - **Run in background**: For clarification and bridge to work, run `genie` via terminal `background=true` so Hermes can poll for `NEEDS_USER_INPUT` signals. Foreground blocks the agent.
 - **Paste-buffer for multi-line**: Interactive claude needs paste-buffer (not send-keys -l) for multi-line prompts. `hermes-spawn.sh` uses `tmux load-buffer` + `paste-buffer` + Enter.
 - **Dual-consumer tool integration**: Configure BOTH Hermes (`config.yaml` → `mcp_servers`) and Claude Code (`settings.json` or `.mcp.json`) for external services.
@@ -384,6 +439,17 @@ If user says "no PR" or "no need to raise a PR", let the pipeline complete throu
 - **Patch tool backslash doubling**: when using the Hermes `patch` tool to edit Python code embedded in bash heredocs, backslashes get doubled. Workaround: use `python3 -c` in terminal instead. See `references/claude-cli-spawn.md`.
 - **Vision model mismatch**: `find_vision_model` scans `model-capabilities.json` for `has_vision=true`. If no vision model cached, falls back to `sonnet`.
 - **Agent question detection**: Uses pattern matching (question phrases, `?` at end of line, `SendUserMessage`). May miss unusual phrasings. `--brief` flag enables structured `SendUserMessage` for more reliable detection.
+- **`set -e` + echo-based verification functions**: Functions like `session_verify_output` echo an issues string and callers check that string — but if the function returns non-zero, `set -e` (inherited from sourced libs or `genie.sh`) kills the pipeline silently before the caller ever sees the output. Fix: these functions must **always `return 0`**. Callers branch on the echoed string, not the return code. See `references/orchestration-debugging.md` §1.
+- **Model quirk — `ocg/glm-5.2` empty tool_use**: This model emits `tool_use` blocks with an **empty `name` field** (e.g., two tool_use blocks, one named `get_time`, one with `name: ""`). Claude Code rejects with "No such tool available" and the agent stalls. Fix: use `syn/hf:zai-org/GLM-5.2` (same model, syn HuggingFace provider route — emits proper tool_use names) for the Opus tier in `~/.claude/settings.json` (`ANTHROPIC_DEFAULT_OPUS_MODEL`). `ds/deepseek-v4-pro-max` is an alternative. Sonnet (`ocg/minimax-m3`) and Haiku (`ds/deepseek-v4-flash`) are unaffected. See `references/orchestration-debugging.md` §2.
+- **TUI readiness — wait for `❯`, not banner**: `session_wait_ready` must poll for the actual input prompt `❯` (or `for agents|/help|/exit`), NOT the `Claude Code` banner which appears ~2-3s early. Claude Code TUI accepts paste at **~8s** after spawn. Pasting before readiness silently swallows the prompt. See `references/orchestration-debugging.md` §3.
+- **Paste verification — detect real work, not pasted text**: After pasting a prompt via tmux `paste-buffer`, verify the agent is actually working by grepping for real-work indicators (`thinking for|reading [0-9]+ files?|↓ [0-9]+ tokens|wibbling|crunched|shenanigan|fiddle|baked|✻ [a-z]`), NOT pasted prompt text or input-activity markers (`●`, `/effort`). Send `Ctrl-U` before each retry to clear stale input. Retry up to 8×. See `references/orchestration-debugging.md` §4.
+- **`pattern_discovery.sh` SIGPIPE**: `set -euo pipefail` + `| head` causes intermittent SIGPIPE → non-zero exit → `set -e` death in `genie.sh`. Wrap the call with `2>/dev/null || log_warn "Pattern discovery failed (non-fatal)"`.
+- **BSA timeout too short**: BSA with heavy tool use (Read+Bash) needs **600s**, not the default 300s. If `spawn_and_monitor` returns 1 on timeout, `set -e` at the call site kills the pipeline. Add `|| true` at the call site — the stop-the-line `spec.md` existence check still gates the phase.
+- **`budget_tracker.py` stdout leakage**: `budget_tracker.py check` and `record` print `[BUDGET] OK: ...` to **stdout**. When `session_name=$(bash hermes-spawn.sh ...)` captures stdout, these lines merge into `session_name` → monitor can't find the tmux session → timeout. Fix: redirect budget_tracker.py stdout to stderr in `hermes-spawn.sh` — `1>&2` for the `check` command, `&>/dev/null` for `record`. `log_info`/`log_warn` already go to `&2` — only `budget_tracker.py` prints to stdout. See `references/orchestration-debugging.md` §7.
+- **All roles need explicit TTLs**: The default `WAITFOR_TTL=300` is too short for ANY complex agent work. BSA=600s, synthesizer=900s, architect=600s, implementor=1200s, system-architect/security-engineer/QAS/RTE=600s. Without explicit TTLs, `spawn_and_monitor` times out, returns 1, and `set -e` may kill the pipeline. See `references/orchestration-debugging.md` §8.
+- **Check tmux before declaring timeout failure**: When `session_monitor_loop` times out, the tmux session may **still be alive and actively coding**. Always check `tmux has-session -t "$session_name"` and `tmux capture-pane` before discarding output. The monitor timeout is a polling deadline, not an agent death. If the agent is still working (spinner active, files being edited), wait for it to finish or increase TTL. Code produced during a "timed out" phase can still be valid and usable. See `references/orchestration-debugging.md` §9.
+- **`--resume` glob doesn't slugify**: `gen_goal_id()` slugifies `goal_desc` to lowercase+hyphens (e.g. `"Build a video"` → `"build-a-video"`), but `--resume` matched raw `goal_desc:0:20` (original case+spaces) against staging dir names. Glob never matched → `--resume` always started fresh. Fix: apply the same `tr/sed` slug transform before globbing. Rule: any code that searches for an identifier created by a transform function must apply the same transform. See `references/orchestration-debugging.md` §10.
+- **Harvesting code from timed-out runs**: When genie exits after a phase timeout, the project directory may already contain a complete, tested codebase. Don't restart from scratch — kill the stale tmux session, install deps, run tests, implement any stubs, commit. Faster than a full `--resume`. See `references/orchestration-debugging.md` §11.
 
 ## What Makes It Different
 

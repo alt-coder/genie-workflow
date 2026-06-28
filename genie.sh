@@ -350,7 +350,7 @@ EOF
     if ! phase_completed "$goal_dir" "skill-scan"; then
         log_v "Phase 0.5a: Skill scan + Pattern discovery"
         bash "${GENIE_DIR}/skill_scan.sh" "$goal_desc" "$goal_dir" 2>/dev/null || log_warn "Skill scan failed (non-fatal)"
-        bash "${GENIE_DIR}/pattern_discovery.sh" "$goal_desc" "$goal_dir" "$project_dir"
+        bash "${GENIE_DIR}/pattern_discovery.sh" "$goal_desc" "$goal_dir" "$project_dir" 2>/dev/null || log_warn "Pattern discovery failed (non-fatal)"
         write_completion_marker "$goal_dir" "skill-scan" "done" 0
     fi
 
@@ -366,7 +366,7 @@ EOF
     if [[ "$mode" == "greenfield" ]]; then
         if ! phase_completed "$goal_dir" "bsa"; then
             log_v "Phase 1a: BSA — spec creation (stop-the-line gate)"
-            spawn_and_monitor "bsa" "$goal_id" "$goal_dir" "$goal_desc"
+            spawn_and_monitor "bsa" "$goal_id" "$goal_dir" "$goal_desc" "" 600 || true
 
             # Stop-the-line: verify spec exists with AC/DoD
             if [[ ! -f "$spec_file" ]] || ! grep -qi "acceptance criteria\|AC[0-9]" "$spec_file" 2>/dev/null; then

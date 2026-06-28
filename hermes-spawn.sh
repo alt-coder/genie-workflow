@@ -112,17 +112,41 @@ genie_spawn() {
     session_wait_ready "$session_name" 30
 
     # ─── 8. Send enriched prompt via paste-buffer (handles multi-line) ───
-    # Load prompt into tmux buffer, paste it, then press Enter to submit
-    tmux load-buffer "$prompt_file" 2>/dev/null && {
+    # CAUTION: rendering the ❯ prompt ≠ stdin is being drained. Claude Code
+    # paints the welcome screen, THEN enters its input select-loop. Pasting
+    # in that gap gets swallowed by the startup flush → the agent idles at
+    # the welcome screen forever (root-caused 2026-06-28). So: settle, paste,
+    # VERIFY the agent actually started, and retry the paste if it didn't
+    # land. Verification is what makes retry safe (no double-paste).
+    sleep 3  # let the TUI enter its input-reading loop (measured ~8s readiness)
+    local _paste_attempts=0
+    while (( _paste_attempts < 8 )); do
+      tmux send-keys -t "$session_name" C-u 2>/dev/null
+      if tmux load-buffer "$prompt_file" 2>/dev/null; then
         tmux paste-buffer -t "$session_name" -d 2>/dev/null
-        sleep 0.5
+        sleep 2.5  # let the full multi-line paste settle into the input box
         tmux send-keys -t "$session_name" Enter
-    } || {
-        # Fallback: send-keys -l (for very large prompts, load-buffer might fail)
+      else
         log_warn "load-buffer failed, using send-keys fallback"
         tmux send-keys -t "$session_name" -l "$(cat "$prompt_file")"
         tmux send-keys -t "$session_name" Enter
-    }
+      fi
+      sleep 3
+      local _pane; _pane=$(tmux capture-pane -p -t "$session_name" -S -40 2>/dev/null || echo "")
+      # Success = the agent is ACTUALLY working (spinner/thinking/tool-use).
+      # Do NOT match pasted prompt text ("You are the …") or the ● / /effort
+      # input-activity indicator — those appear when a paste merely lands in
+      # the input unsubmitted, which gives a false positive and breaks the
+      # retry loop before Enter has submitted a large multi-line prompt
+      # (root-caused 2026-06-28: BSA sat idle, no spec written, timed out).
+      if echo "$_pane" | grep -qiE 'thinking for|reading [0-9]+ files?|↓ [0-9]+ tokens|wibbling|crunched|shenanigan|fiddle|baked|✻ [a-z]'; then
+        log_ok "Prompt pasted + agent working in '$session_name' (attempt $((_paste_attempts+1)))"
+        break
+      fi
+      _paste_attempts=$((_paste_attempts+1))
+      log_warn "paste not landed in '$session_name' (attempt ${_paste_attempts}); retrying"
+      sleep 1
+    done
 
     # ─── 9. Pipe-pane logging ───
     local raw_log="${goal_dir}/raw-logs/${session_name}.raw"

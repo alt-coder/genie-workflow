@@ -37,13 +37,15 @@ session_wait_ready() {
   while true; do
     local out; out=$(session_read "$sess" 15)
 
-    # Ready indicators: claude shows prompt or welcome banner done
-    # The interactive prompt is typically "> " or a colored block.
-    # After welcome, claude shows tips or waits for input.
-    if echo "$out" | grep -qE '^\s*$|^>\s|^╭─|^│.*tips|^Welcome.*│|/help|esc for|Claude Code|Tips|cwd:|model:|/exit'; then
-      # Extra check: make sure it's not mid-launch (no "Starting..." etc.)
+    # Ready indicator: the `❯` input prompt (or bottom status "for agents")
+    # appears ONLY when Claude Code's TUI input loop is running and ready to
+    # accept a paste. Matching the early "Claude Code" banner is a bug — it
+    # fires during boot, before stdin is being read, so the pasted prompt is
+    # swallowed by claude's startup stdin flush → agent sits idle forever.
+    # Keep the boot-guard below; on timeout we still assume ready (best-effort).
+    if echo "$out" | grep -qE '❯|for agents|/help|/exit'; then
       if ! echo "$out" | grep -qiE 'starting|loading|initializing'; then
-        log_ok "Claude ready in '$sess'"
+        log_ok "Claude ready in '$sess' (❯ prompt detected)"
         return 0
       fi
     fi
@@ -311,11 +313,21 @@ session_monitor_loop() {
 # Echoes specific issues found (if any).
 session_verify_output() {
   local goal_dir="$1"; local role="$2"; local idx="${3:-}"
-  local agent_file="${goal_dir}/agent-${role}${idx:+-${idx}}.md"
+  # BSA's deliverable is spec.md (not agent-bsa.md) — verify the right file.
+  # NOTE: this function MUST return 0. Callers check the echoed $issues
+  # string, not the return code — and a non-zero return here trips `set -e`
+  # in spawn_and_monitor (`issues=$(session_verify_output ...)`) and
+  # silently kills the whole pipeline right after BSA, before Phase 1b
+  # (root-caused 2026-06-28). Echo issues; never fail.
+  local agent_file
+  case "$role" in
+    bsa) agent_file="${goal_dir}/spec.md" ;;
+    *)   agent_file="${goal_dir}/agent-${role}${idx:+-${idx}}.md" ;;
+  esac
 
   if [[ ! -f "$agent_file" ]] || [[ ! -s "$agent_file" ]]; then
-    echo "Output file missing or empty"
-    return 1
+    echo "Output file missing or empty (${agent_file})"
+    return 0
   fi
 
   local content; content=$(cat "$agent_file")
@@ -372,9 +384,7 @@ session_verify_output() {
 
   if [[ -n "$issues" ]]; then
     echo "$issues"
-    return 1
   fi
-
   return 0
 }
 

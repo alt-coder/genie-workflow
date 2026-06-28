@@ -56,7 +56,7 @@ genie_spawn() {
     local est_cost
     est_cost=$(genie_estimate_cost "$role" 8000 "$goal_dir")
     log_info "Budget check: ${role} estimated \$${est_cost}"
-    if ! python3 "${GENIE_DIR}/budget_tracker.py" check "$goal_id" --estimate "$est_cost"; then
+    if ! python3 "${GENIE_DIR}/budget_tracker.py" check "$goal_id" --estimate "$est_cost" 1>&2; then
         log_error "Budget gate blocked spawn of ${role}"
         return 1
     fi
@@ -176,7 +176,7 @@ genie_spawn() {
 EOF
 
     # ─── 11. Record cost ───
-    python3 "${GENIE_DIR}/budget_tracker.py" record "$goal_id" --cost "$est_cost" --phase "${role}${suffix}" 2>/dev/null || true
+    python3 "${GENIE_DIR}/budget_tracker.py" record "$goal_id" --cost "$est_cost" --phase "${role}${suffix}" &>/dev/null || true
 
     log_ok "Spawned ${role} -> ${session_name} (PID: ${pid:-unknown})"
     echo "$session_name"

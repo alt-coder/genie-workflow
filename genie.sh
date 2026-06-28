@@ -406,12 +406,12 @@ EOF
         spawn_parallel_critics "$goal_id" "$goal_dir" "$goal_desc" "$critic_count"
 
         log_v "Phase 1b: Synthesizer"
-        spawn_and_monitor "synthesizer" "$goal_id" "$goal_dir" "$goal_desc"
+        spawn_and_monitor "synthesizer" "$goal_id" "$goal_dir" "$goal_desc" "" 900
     fi
 
     if ! phase_completed "$goal_dir" "architect"; then
         log_v "Phase 1b: Architect — plan.md"
-        spawn_and_monitor "architect" "$goal_id" "$goal_dir" "$goal_desc"
+        spawn_and_monitor "architect" "$goal_id" "$goal_dir" "$goal_desc" "" 600
     fi
 
     # Phase 2+3: Build → QAS gate loop (max 3 iterations)
@@ -424,7 +424,7 @@ EOF
 
         # Phase 2: Implementor
         if ! phase_completed "$goal_dir" "implementor"; then
-            spawn_and_monitor "implementor" "$goal_id" "$goal_dir" "$goal_desc"
+            spawn_and_monitor "implementor" "$goal_id" "$goal_dir" "$goal_desc" "" 1200
         fi
 
         # Complexity triggers → budget raise + SysArch review
@@ -434,7 +434,7 @@ EOF
 
             if ! phase_completed "$goal_dir" "system-architect"; then
                 log_v "Phase 4b: System Architect review (complexity-triggered, MANDATORY)"
-                spawn_and_monitor "system-architect" "$goal_id" "$goal_dir" "$goal_desc"
+                spawn_and_monitor "system-architect" "$goal_id" "$goal_dir" "$goal_desc" "" 600
 
                 if grep -qi "REQUIRES_FIXES" "${goal_dir}/agent-system-architect.md" 2>/dev/null; then
                     log_info "SysArch requested fixes — re-implementing"
@@ -449,7 +449,7 @@ EOF
         if grep -rli "password\|secret\|api_key\|auth\|token\|rls\|row.level" "$project_dir" --include='*.ts' --include='*.py' --include='*.sh' --include='*.sql' 2>/dev/null | grep -qv node_modules; then
             if ! phase_completed "$goal_dir" "security-engineer"; then
                 log_v "Phase 4a: Security Engineer audit"
-                spawn_and_monitor "security-engineer" "$goal_id" "$goal_dir" "$goal_desc"
+                spawn_and_monitor "security-engineer" "$goal_id" "$goal_dir" "$goal_desc" "" 600
 
                 if grep -qi "SECURITY_BLOCKED" "${goal_dir}/agent-security-engineer.md" 2>/dev/null; then
                     log_error "Security block — re-implementing"
@@ -463,7 +463,7 @@ EOF
         # Phase 3: QAS gate
         if ! phase_completed "$goal_dir" "qas"; then
             log_v "Phase 3: QAS gate (independence gate)"
-            spawn_and_monitor "qas" "$goal_id" "$goal_dir" "$goal_desc"
+            spawn_and_monitor "qas" "$goal_id" "$goal_dir" "$goal_desc" "" 600
 
             if grep -qi "Approved for RTE\|APPROVED\|PASS" "${goal_dir}/agent-qas.md" 2>/dev/null; then
                 qas_approved=true
@@ -494,7 +494,7 @@ EOF
     if ! phase_completed "$goal_dir" "rte"; then
         if git -C "$project_dir" rev-parse --git-dir &>/dev/null 2>&1; then
             log_v "Phase 6: PR creation (RTE)"
-            spawn_and_monitor "rte" "$goal_id" "$goal_dir" "$goal_desc"
+            spawn_and_monitor "rte" "$goal_id" "$goal_dir" "$goal_desc" "" 600
         else
             log_v "Not a git repo — skipping PR phase. Output in staging."
         fi

@@ -298,9 +298,11 @@ main() {
     goal_id=$(gen_goal_id "$goal_desc")
     local goal_dir="${STAGING_DIR}/${goal_id}"
 
-    # Resume: find existing goal dir
+    # Resume: find existing goal dir (slugify goal_desc to match gen_goal_id naming)
     if [[ "$resume" == "true" ]]; then
-        local existing_dir=$(ls -d "${STAGING_DIR}/"*"${goal_desc:0:20}"* 2>/dev/null | head -1)
+        local resume_slug
+        resume_slug=$(echo "$goal_desc" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/-$//')
+        local existing_dir=$(ls -d "${STAGING_DIR}/"*"-${resume_slug:0:20}"* 2>/dev/null | head -1)
         if [[ -n "$existing_dir" ]] && [[ -d "$existing_dir" ]]; then
             goal_dir="$existing_dir"
             goal_id=$(basename "$goal_dir")
